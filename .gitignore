@@ -137,3 +137,7 @@ dmypy.json
 
 #vscode debugger
 /.vscode
+
+.idea/
+.serena/
+.claude/
