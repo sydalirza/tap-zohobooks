@@ -1,0 +1,111 @@
+"""freshbooks Authentication."""
+from singer_sdk.authenticators import APIAuthenticatorBase
+from singer_sdk.streams import Stream as RESTStreamBase
+from typing import Optional
+from datetime import datetime
+import requests
+import json
+
+
+class OAuth2Authenticator(APIAuthenticatorBase):
+    """API Authenticator for OAuth 2.0 flows."""
+
+    def __init__(
+        self,
+        stream: RESTStreamBase,
+        config_file: Optional[str] = None,
+        auth_endpoint: Optional[str] = None,
+    ) -> None:
+        super().__init__(stream=stream)
+        self._auth_endpoint = auth_endpoint
+        self._config_file = config_file
+        self._tap = stream._tap
+
+    @property
+    def auth_headers(self) -> dict:
+        """Return a dictionary of auth headers to be applied.
+
+        These will be merged with any `http_headers` specified in the stream.
+
+        Returns:
+            HTTP headers for authentication.
+        """
+        if not self.is_token_valid():
+            self.update_access_token()
+        return {
+            "Authorization": f"Zoho-oauthtoken {self._tap._config.get('access_token')}"
+        }
+
+    @auth_headers.setter
+    def auth_headers(self, value: dict) -> None:
+        """Setter for auth_headers to allow base class initialization."""
+        pass
+
+    @property
+    def auth_endpoint(self) -> str:
+        """Get the authorization endpoint.
+
+        Returns:
+            The API authorization endpoint if it is set.
+
+        Raises:
+            ValueError: If the endpoint is not set.
+        """
+        if not self._auth_endpoint:
+            raise ValueError("Authorization endpoint not set.")
+        return self._auth_endpoint
+
+    @property
+    def oauth_request_body(self) -> dict:
+        """Define the OAuth request body for the API."""
+        return {
+            "client_id": self._tap._config["client_id"],
+            "client_secret": self._tap._config["client_secret"],
+            "refresh_token": self._tap._config["refresh_token"],
+            "grant_type": "refresh_token",
+        }
+
+    def is_token_valid(self) -> bool:
+        now = round(datetime.utcnow().timestamp())
+        expires_in = 3600
+        created_at = self._tap._config.get(
+            "created_at", 0
+        )  # make sure it returns invalid if created_at is not there, so it can be generated
+
+        return now < (created_at + expires_in - 60)
+
+    @property
+    def oauth_request_payload(self) -> dict:
+        """Get request body.
+
+        Returns:
+            A plain (OAuth) or encrypted (JWT) request body.
+        """
+        return self.oauth_request_body
+
+    # Authentication and refresh
+    def update_access_token(self) -> None:
+        """Update `access_token` along with: `last_refreshed` and `expires_in`.
+
+        Raises:
+            RuntimeError: When OAuth login fails.
+        """
+        auth_request_payload = self.oauth_request_payload
+        token_response = requests.post(self.auth_endpoint, data=auth_request_payload)
+        try:
+            token_response.raise_for_status()
+            self.logger.info("OAuth authorization attempt was successful.")
+            token_last_refreshed = round(datetime.utcnow().timestamp())
+            if "error" in token_response.json():
+                raise Exception
+        except Exception as ex:
+            raise RuntimeError(
+                f"Failed OAuth login. response={token_response.json()}. url={self.auth_endpoint}."
+            )
+        token_json = token_response.json()
+        self.access_token = token_json["access_token"]
+
+        self._tap._config["created_at"] = token_last_refreshed
+        self._tap._config["access_token"] = token_json["access_token"]
+        with open(self._tap.config_file, "w") as outfile:
+            json.dump(self._tap._config, outfile, indent=4)
